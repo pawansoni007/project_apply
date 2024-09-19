@@ -1,4 +1,4 @@
-Here's a README.md for the project:
+# README.md 
 
 # Job Alerts Automation System
 
