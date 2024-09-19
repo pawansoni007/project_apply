@@ -4,7 +4,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 
 const { sendJobAlertEmail } = require('../utils/sendJobAlerts');
-const { JobPost, User } = require('../models/models');
+const { JobPost, User, UserJobMatch } = require('../models/models');
 const { fetchResumeFile } = require('../utils/fetchResumeFile');
 const { extractJobInfo } = require('../utils/jobDescriptionParser');
 const logger = require('../utils/logger');
@@ -12,35 +12,63 @@ const { BATCH_SIZE } = require('../config/constants');
 const { cleanJobPosts } = require('../utils/commonOperations');
 
 async function processJobAlerts(userId) {
+  const user = await User.findById(userId);
+
   let newJobPosts = await JobPost.find({
     createdAt: { $gt: user.lastProcessedAt || new Date(0) },
   })
     .sort({ createdAt: -1 })
     .limit(12)
     .select(
-      'title "jobTypeReference.jobType" extractedJob experience.experience domain'
+      'id title "jobTypeReference.jobType" extractedJob experience.experience domain'
     )
-    .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents. 
+    .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
+
+  logger.info(
+    `New job posts of length ${newJobPosts.length}: ${JSON.stringify(
+      newJobPosts
+    )}`
+  );
 
   if (!newJobPosts || newJobPosts.length === 0)
     return { message: 'No new job posts to process' };
 
-  const user = await User.findById(userId);
 
-  if (jobPostsToFilterForUser.length > 0) {
+  let filteredJobs = {};
+  if (newJobPosts.length > 0) {
     const resumeFile = await fetchResumeFile(user.resumeUrl);
-    const filteredJobs = await filterJobsWithGemini(
-      user.jobFilter,
-      newJobPosts,
-      resumeFile
-    );
+    for (let i = 0; i < newJobPosts.length; i += BATCH_SIZE) {
+      const batch = newJobPosts.slice(i, i + BATCH_SIZE);
 
+      let tempFilteredJobs = await filterJobsWithGemini(
+        user.jobFilter,
+        batch,
+        resumeFile
+      ); // this is returning object with jobId as key and filtered job as value
+      // append to filteredJobs
+      filteredJobs = { ...filteredJobs, ...tempFilteredJobs };
+    }
+
+    let result = await saveMatchingJobs(filteredJobs);
+
+    logger.info(newJobPosts.map((job) => job.id));
+    logger.info(result.map((job) => job.upsertedId));
+
+    // Group newJobPosts extracted fields with result
+    let newJobPostsWithFields = newJobPosts.map((job) => {
+      return {
+        ...job,
+        ...filteredJobs[job.id],
+      };
+    });
+
+    
     logger.info(`------------------------------------------------`);
-    logger.info(`Filtered jobs: ${JSON.stringify(filteredJobs)}`);
+    logger.info(`Filtered jobs: ${JSON.stringify(newJobPostsWithFields)}`);
     logger.info(`------------------------------------------------`);
 
-    if (filteredJobs.length > 0) {
-      sendJobAlertEmail(user.email, filteredJobs);
+    if (result.length > 0) {
+      // sendJobAlertEmail(user.email, newJobPostsWithFields);
     }
 
     user.lastProcessedAt = new Date();
@@ -48,10 +76,36 @@ async function processJobAlerts(userId) {
   }
   return {
     message: 'Job alerts processed successfully',
-    // jobsProcessed: newJobPosts.length,
+    // jobsProcessed: result.length,
     // newJobsFound: newJobPosts.length,
     // filteredJobsCount: filteredJobs ? filteredJobs.length : 0
   };
+}
+
+async function saveMatchingJobs(filteredJobs) {
+  const filteredJobsToBulkUpsert = Object.entries(filteredJobs).map(
+    ([jobId, job]) => {
+      return {
+        updatedOne: {
+          filter: { userId: userId, jobId: jobId },
+          update: {
+            $set: {
+              resumeMatchScore: job.resumeMatchScore,
+              requirementMatchScore: job.requirementMatchScore,
+              overallMatchScore: job.overallMatchScore,
+              fitReason: job.fitReason,
+              areasForImprovement: job.areasForImprovement,
+              createdAt: new Date().toISOString(),
+            },
+          },
+          upsert: true,
+        },
+      };
+    }
+  );
+
+  let result = await UserJobMatch.bulkWrite(filteredJobsToBulkUpsert);
+  return result;
 }
 
 async function processUnextractedJobPosts() {
@@ -72,7 +126,7 @@ async function processUnextractedJobPosts() {
       for (let i = 0; i < unprocessedJobPosts.length; i += BATCH_SIZE) {
         const batch = unprocessedJobPosts.slice(i, i + BATCH_SIZE);
         const processedJobBatch = await extractJobInfo(batch);
-
+        // TODO - Can go for a bulk update here
         for (const job of processedJobBatch) {
           try {
             const updatedJob = await JobPost.findOneAndUpdate(
@@ -97,7 +151,7 @@ async function processUnextractedJobPosts() {
 
 async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
   try {
-    const genAI = new GoogleGenerativeAI(process.env.EXPRESS_GEMINI_API_KEY_3);
+    const genAI = new GoogleGenerativeAI(process.env.EXPRESS_GEMINI_API_KEY_2);
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-pro',
       systemInstruction:
@@ -131,7 +185,7 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
       Remember:
       - No candidate is likely to be a perfect match for all job requirements.
       - Highlight specific strengths while also noting areas for potential growth.
-      - Be honest about potential mismatches without being discouraging.
+      - Be honest about potential mismatches.
       - Avoid overgeneralizing or making assumptions about the user's abilities beyond what's stated in their resume or requirements.
       
       Here are the user requirements:

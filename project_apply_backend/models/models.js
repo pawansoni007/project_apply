@@ -66,7 +66,11 @@ const userJobMatchSchema = new mongoose.Schema({
     ref: 'JobPost',
     required: true,
   },
-  matchScore: { type: Number, required: true },
+  resumeMatchScore: { type: Number }, 
+  requirementMatchScore: { type: Number },
+  overallMatchScore: { type: Number },
+  fitReason: { type: String },
+  areasForImprovement: { type: String },
   isNewJob: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
 });
