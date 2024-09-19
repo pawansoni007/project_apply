@@ -1,5 +1,3 @@
-# README.md 
-
 # Job Alerts Automation System
 
 This project is a job alerts automation system that processes job postings, matches them with user profiles, and sends personalized job alerts.
