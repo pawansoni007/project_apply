@@ -60,18 +60,17 @@ const JobPost = mongoose.model('JobPost', jobPostSchema);
 
 // New schema for storing user-job matches
 const userJobMatchSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  userId: { type: String, ref: 'User', required: true },
   jobId: {
-    type: mongoose.Schema.Types.ObjectId,
+    type: String,
     ref: 'JobPost',
     required: true,
   },
-  resumeMatchScore: { type: Number }, 
-  requirementMatchScore: { type: Number },
-  overallMatchScore: { type: Number },
+  resumeMatchScore: { type: Number, default: 0 },
+  requirementMatchScore: { type: Number, default: 0 },
+  overallMatchScore: { type: Number, default: 0 },
   fitReason: { type: String },
   areasForImprovement: { type: String },
-  isNewJob: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now },
 });
 
@@ -79,6 +78,6 @@ const UserJobMatch = mongoose.model('UserJobMatch', userJobMatchSchema);
 
 // Create indexes for efficient querying
 userJobMatchSchema.index({ userId: 1, jobId: 1 }, { unique: true });
-userJobMatchSchema.index({ userId: 1, matchScore: -1 });
+userJobMatchSchema.index({ userId: 1, overallMatchScore: -1 });
 
 module.exports = { User, JobPost, UserJobMatch };

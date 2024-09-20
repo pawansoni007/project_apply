@@ -5,11 +5,9 @@ const { BlobServiceClient } = require('@azure/storage-blob');
 const dotenv = require('dotenv');
 const logger = require('../utils/logger');
 const jwt = require('jsonwebtoken');
-const { initializeAzureStorage } = require('../utils/azureStorage');  
+const { initializeAzureStorage } = require('../utils/azureStorage');
 
 dotenv.config();
-
-let containerClient;
 
 // Registration endpoint
 function register(req, res) {
@@ -17,7 +15,7 @@ function register(req, res) {
     try {
       const { email, password } = req.body;
 
-      initializeAzureStorage();
+      const containerClient = await initializeAzureStorage();
 
       // Upload resume to Azure Blob Storage
       console.log(req.file);
@@ -136,10 +134,10 @@ function getProfile(req, res) {
 function login(req, res, next) {
   return new Promise(async (resolve, reject) => {
     try {
-      logger.info('Login request received');
+      // logger.info('Login request received');
       const { email, password } = req.body;
       const user = await User.findOne({ email });
-      logger.info(`User found: ${user.email}, ${user.id}, ${user.password}`);
+      // logger.info(`User found: ${user.email}, ${user.id}, ${user.password}`);
 
       if (!user || !(await compare(password, user.password))) {
         return res.status(401).json({ message: 'Invalid credentials' });
@@ -161,7 +159,6 @@ function login(req, res, next) {
           email: user.email,
           profileCompleted: user.profileCompleted,
         },
-        token: token,
       });
       resolve();
     } catch (error) {

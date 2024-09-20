@@ -18,23 +18,17 @@ async function processJobAlerts(userId) {
     createdAt: { $gt: user.lastProcessedAt || new Date(0) },
   })
     .sort({ createdAt: -1 })
-    .limit(12)
+    .limit(12) // TODO - might remove this, as i am already doing batch processing
     .select(
       'id title "jobTypeReference.jobType" extractedJob experience.experience domain'
     )
     .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
 
-  logger.info(
-    `New job posts of length ${newJobPosts.length}: ${JSON.stringify(
-      newJobPosts
-    )}`
-  );
-
   if (!newJobPosts || newJobPosts.length === 0)
     return { message: 'No new job posts to process' };
 
-
   let filteredJobs = {};
+  let personalizedJobRecommendations = [];
   if (newJobPosts.length > 0) {
     const resumeFile = await fetchResumeFile(user.resumeUrl);
     for (let i = 0; i < newJobPosts.length; i += BATCH_SIZE) {
@@ -44,31 +38,72 @@ async function processJobAlerts(userId) {
         user.jobFilter,
         batch,
         resumeFile
-      ); // this is returning object with jobId as key and filtered job as value
-      // append to filteredJobs
+      );
+
       filteredJobs = { ...filteredJobs, ...tempFilteredJobs };
     }
+    // logger.info(`Filtered jobs: ${JSON.stringify(filteredJobs, null, 2)}`);
 
-    let result = await saveMatchingJobs(filteredJobs);
+    let result = await saveMatchingJobs(filteredJobs, userId);
 
-    logger.info(newJobPosts.map((job) => job.id));
-    logger.info(result.map((job) => job.upsertedId));
+    logger.info(`newJobPosts: ${newJobPosts.map((job) => job.id)} >>>> \n\n `);
+    logger.info(`result.upsertedIds: ${result.upsertedIds}`);
 
-    // Group newJobPosts extracted fields with result
-    let newJobPostsWithFields = newJobPosts.map((job) => {
-      return {
-        ...job,
-        ...filteredJobs[job.id],
-      };
-    });
+    personalizedJobRecommendations = newJobPosts
+      .filter((job) => filteredJobs[job.id])
+      .map(
+        ({
+          apply,
+          companyImage,
+          domain,
+          experience,
+          id,
+          createdAt,
+          salary,
+          jobTypeReference,
+          title,
+          extractedJob,
+        }) => {
+          logger.info(
+            `${apply} ${id} ${title} ${salary} ${jobTypeReference} ${experience} ${domain} ${companyImage} ${extractedJob} >>>>> \n\n\n\n`
+          );
+          logger.info(`filteredJobs[id], ${filteredJobs[id]}`);
+          const {
+            resumeMatchScore,
+            requirementMatchScore,
+            overallMatchScore,
+            fitReason,
+            areasForImprovement,
+          } = filteredJobs[id];
 
-    
-    logger.info(`------------------------------------------------`);
-    logger.info(`Filtered jobs: ${JSON.stringify(newJobPostsWithFields)}`);
-    logger.info(`------------------------------------------------`);
+          return {
+            apply,
+            companyImage: companyImage.url,
+            companyName: extractedJob['Company Name'],
+            domain: domain.domain,
+            experience: experience.experience,
+            id,
+            createdAt: getJobFreshness(createdAt['$date']),
+            salary,
+            jobTypeReference: jobTypeReference.jobType,
+            title,
+            resumeMatchScore,
+            requirementMatchScore,
+            overallMatchScore,
+            fitReason,
+            areasForImprovement,
+          };
+        }
+      );
 
-    if (result.length > 0) {
-      // sendJobAlertEmail(user.email, newJobPostsWithFields);
+    // logger.info(`------------------------------------------------`);
+    // logger.info(
+    //   `Filtered jobs: ${JSON.stringify(personalizedJobRecommendations)}`
+    // );
+    // logger.info(`------------------------------------------------`);
+
+    if (personalizedJobRecommendations.length > 0) {
+      sendJobAlertEmail(user.email, personalizedJobRecommendations);
     }
 
     user.lastProcessedAt = new Date();
@@ -76,17 +111,16 @@ async function processJobAlerts(userId) {
   }
   return {
     message: 'Job alerts processed successfully',
-    // jobsProcessed: result.length,
-    // newJobsFound: newJobPosts.length,
-    // filteredJobsCount: filteredJobs ? filteredJobs.length : 0
+    personalizedJobRecommendations,
+    totalJobsProcessed: personalizedJobRecommendations.length,
   };
 }
 
-async function saveMatchingJobs(filteredJobs) {
+async function saveMatchingJobs(filteredJobs, userId) {
   const filteredJobsToBulkUpsert = Object.entries(filteredJobs).map(
     ([jobId, job]) => {
       return {
-        updatedOne: {
+        updateOne: {
           filter: { userId: userId, jobId: jobId },
           update: {
             $set: {
@@ -120,8 +154,14 @@ async function processUnextractedJobPosts() {
     );
     const unprocessedJobPosts = cleanJobPosts(newJobPosts);
 
-    logger.info(`Job posts to process: ${unprocessedJobPosts.length}`);
+    // Processing any failed job posts
+    const unprocessedOrFailedJobPosts = await JobPost.find({
+      $or: [{ extractedJob: { $exists: false } }, { extractedJob: null }],
+    });
 
+    unprocessedJobPosts.push(...unprocessedOrFailedJobPosts);
+
+    logger.info(`Job posts to process: ${unprocessedJobPosts.length}`);
     if (unprocessedJobPosts.length > 0) {
       for (let i = 0; i < unprocessedJobPosts.length; i += BATCH_SIZE) {
         const batch = unprocessedJobPosts.slice(i, i + BATCH_SIZE);
@@ -155,7 +195,31 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-pro',
       systemInstruction:
-        'Return a JSON object as specified in the prompt without any formattings or markdown applied around the response.',
+        'Return valid, parsable JSON array of objects with no "\n" escapes or extra formatting. Verify JSON validity in Node.js environment before responding. Follow all prompt instructions carefully.JSON.parse() should not throw any errors when I try to parse the response.',
+      generationConfig: {
+        temperature: 1.0,
+        topK: 1,
+        topP: 1,
+        maxOutputTokens: 8192,
+      },
+      safetySettings: [
+        {
+          category: 'HARM_CATEGORY_DANGEROUS_CONTENT',
+          threshold: 'BLOCK_NONE',
+        },
+        {
+          category: 'HARM_CATEGORY_HATE_SPEECH',
+          threshold: 'BLOCK_NONE',
+        },
+        {
+          category: 'HARM_CATEGORY_HARASSMENT',
+          threshold: 'BLOCK_NONE',
+        },
+        {
+          category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT',
+          threshold: 'BLOCK_NONE',
+        },
+      ],
     });
 
     const prompt = `
@@ -164,21 +228,28 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
     1. Analyze each job post's description and details.
     2. Compare the job post against the user's requirements and resume.
     3. Include the job post in the results if:
-    - The experience range matches (or is close to) the user's specified range and resume experience.
-    - At least ${
-      userFilter.skillMatchPercentage
-    }% of the user's specified skills in the json file or skills mentioned in their resume are mentioned or implied in the job description.
+      - The experience range matches (or is close to) the user's specified range and resume experience.
+      - At least ${
+        userFilter.skillMatchPercentage
+      }% of the user's specified skills in the json file or skills mentioned in their resume are mentioned or implied in the job description.
       - The job domain matches one of the user's specified domains or aligns with their resume.
-      
-      4. For each matching job post, add the following fields:
+        
+    4. For each matching job post, add the following fields:
+      - "id" - The job id
       - "resumeMatchScore": A number from 0-100 indicating how well the job aligns with the user's resume.
       - "requirementMatchScore": A number from 0-100 indicating how well the job aligns with the user's specified requirements in the JSON file.
       - "overallMatchScore": An average of resumeMatchScore and requirementMatchScore.
-      - "fitReason": A brief, balanced explanation of why the user might be a good fit for this job, highlighting specific matching skills or experiences without overgeneralizing.
-      - "areasForImprovement": A constructive, brief explanation of potential gaps or areas where the user might need to develop further to fully meet the job requirements. This should be realistic without being demotivating.
+      - "fitReason": A single concise string (max 100 words) highlighting the candidate's strongest matching skills or experiences for this role. Focus on the most relevant qualifications that align with key job requirements.
+
+      - "areasForImprovement": A single concise string (max 100 words) providing an honest evaluation of the candidate's suitability, including:
+          1. A brief assessment of the overall match.
+          2. One key strength relevant to the role.
+          3. One significant gap or area for improvement.
+          4. A clear recommendation on whether to apply.
+          Be specific and honest, balancing encouragement with realistic advice.
       
       5. Sort the results by overallMatchScore in descending order.
-      6. Return the filtered and sorted job posts as a JSON array, including the new fields for each job post, but do not include extractedJob, domain, experience, title which is passed as an input.
+      6. Return a JSON array of filtered and sorted job posts. Include only the new fields from point 4 for each job. Exclude all input fields (extractedJob, domain, experience, title).
       
       Be realistic and nuanced in your matching. Consider synonyms and related terms, but also acknowledge that not all skills or experiences will be exact matches. Provide a balanced view of the user's fit for each role.
   
@@ -204,24 +275,40 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
           "resumeMatchScore": 80,
           "requirementMatchScore": 90,
           "overallMatchScore": 85,
-          "fitReason": "Your 5 years of Python development aligns well with the job's requirements. Your experience with AWS services is also a strong match.",
-          "areasForImprovement": "The role requires experience with Kubernetes, which isn't mentioned in your resume. Consider gaining some exposure to this technology."
+          "fitReason": "5 years Python experience and AWS knowledge align well with requirements.",
+          "areasForImprovement": "Gap: No Kubernetes experience. Consider learning it to improve candidacy."
         },
-        "456": {
-          "resumeMatchScore": 75,
-          "requirementMatchScore": 85,
-          "overallMatchScore": 80,
-          "fitReason": "Your background in data analysis and proficiency in SQL make you a strong candidate for this data scientist role.",
-          "areasForImprovement": "The job emphasizes machine learning skills. While you have some experience, deepening your knowledge in this area could strengthen your candidacy."
+      }
+      where 123 is the job id.
+
+      IMPORTANT: Ensure your response is a valid JSON object. Properly escape all string values, especially those containing quotes or special characters. For example:
+      {
+        "123": {
+          "fitReason": "Your experience with \"Python\" and AWS aligns well with the job requirements.",
         }
       }
-      where 123 and 456 are the job ids.
     `;
 
     const result = await model.generateContent([prompt, resumeFile]);
-    const response = result.response;
-    logger.info(`Response: ${JSON.stringify(response)}`);
-    return JSON.parse(response.text());
+
+    let finalProcessedJobs;
+    const rawJobsData = result.response.candidates[0].content.parts[0].text;
+
+    if (typeof rawJobsData === 'string') {
+      const cleanedString = rawJobsData.trim();
+      finalProcessedJobs = JSON.parse(cleanedString);
+    } else {
+      finalProcessedJobs = rawJobsData;
+    }
+
+    const groupedJobs = {};
+    finalProcessedJobs.forEach((job) => {
+      if (!groupedJobs[job.id]) {
+        groupedJobs[job.id] = job;
+      }
+    });
+
+    return groupedJobs;
   } catch (error) {
     logger.error(`Error filtering jobs with Gemini: ${error}`);
     throw error;

@@ -1,3 +1,8 @@
+const { BlobServiceClient } = require('@azure/storage-blob');
+const logger = require('./logger');
+const dotenv = require('dotenv');
+dotenv.config();
+
 async function initializeAzureStorage() {
   try {
     if (!process.env.AZURE_STORAGE_CONNECTION_STRING) {
@@ -6,9 +11,9 @@ async function initializeAzureStorage() {
     const blobServiceClient = BlobServiceClient.fromConnectionString(
       process.env.AZURE_STORAGE_CONNECTION_STRING
     );
-    containerClient = blobServiceClient.getContainerClient('resume');
-    await containerClient.getProperties();
+    const containerClient = blobServiceClient.getContainerClient('resume');
     logger.info('Successfully connected to Azure Blob Storage');
+    return containerClient;
   } catch (error) {
     logger.error('Failed to initialize Azure Blob storage:', error);
     // You might want to exit the process here or handle it differently
