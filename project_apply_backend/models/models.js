@@ -19,8 +19,10 @@ const userSchema = new mongoose.Schema(
     },
     resumeUrl: { type: String, default: null },
     lastProcessedJobId: { type: String, default: null },
+    lastProcessedAt: { type: Date, default: null },
     profileCompleted: { type: Boolean, default: false },
   },
+
   { timestamps: true }
 );
 

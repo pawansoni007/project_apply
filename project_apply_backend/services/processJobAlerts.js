@@ -9,30 +9,39 @@ const { fetchResumeFile } = require('../utils/fetchResumeFile');
 const { extractJobInfo } = require('../utils/jobDescriptionParser');
 const logger = require('../utils/logger');
 const { BATCH_SIZE } = require('../config/constants');
-const { cleanJobPosts } = require('../utils/commonOperations');
+const { cleanJobPosts, getJobFreshness } = require('../utils/commonOperations');
 
 async function processJobAlerts(userId) {
   const user = await User.findById(userId);
-
+  logger.info(`user: ${JSON.stringify(user, null, 2)}`);
   let newJobPosts = await JobPost.find({
     createdAt: { $gt: user.lastProcessedAt || new Date(0) },
   })
     .sort({ createdAt: -1 })
-    .limit(12) // TODO - might remove this, as i am already doing batch processing
+    // .limit(12) // TODO - might remove this, as i am already doing batch processing
     .select(
-      'id title "jobTypeReference.jobType" extractedJob experience.experience domain'
+      'id title jobTypeReference extractedJob experience domain companyImage apply createdAt salary'
     )
     .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
+
+  const jobPostsList = newJobPosts.map((job) => ({
+    id: job.id,
+    title: job.title,
+    jobType: job.jobTypeReference.jobType,
+    extractedJob: job.extractedJob,
+    experience: job.experience.experience,
+    domain: job.domain.domain,
+  }));
 
   if (!newJobPosts || newJobPosts.length === 0)
     return { message: 'No new job posts to process' };
 
   let filteredJobs = {};
   let personalizedJobRecommendations = [];
-  if (newJobPosts.length > 0) {
+  if (jobPostsList.length > 0) {
     const resumeFile = await fetchResumeFile(user.resumeUrl);
-    for (let i = 0; i < newJobPosts.length; i += BATCH_SIZE) {
-      const batch = newJobPosts.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < jobPostsList.length; i += BATCH_SIZE) {
+      const batch = jobPostsList.slice(i, i + BATCH_SIZE);
 
       let tempFilteredJobs = await filterJobsWithGemini(
         user.jobFilter,
@@ -42,12 +51,8 @@ async function processJobAlerts(userId) {
 
       filteredJobs = { ...filteredJobs, ...tempFilteredJobs };
     }
-    // logger.info(`Filtered jobs: ${JSON.stringify(filteredJobs, null, 2)}`);
 
-    let result = await saveMatchingJobs(filteredJobs, userId);
-
-    logger.info(`newJobPosts: ${newJobPosts.map((job) => job.id)} >>>> \n\n `);
-    logger.info(`result.upsertedIds: ${result.upsertedIds}`);
+    await saveMatchingJobs(filteredJobs, userId);
 
     personalizedJobRecommendations = newJobPosts
       .filter((job) => filteredJobs[job.id])
@@ -64,10 +69,6 @@ async function processJobAlerts(userId) {
           title,
           extractedJob,
         }) => {
-          logger.info(
-            `${apply} ${id} ${title} ${salary} ${jobTypeReference} ${experience} ${domain} ${companyImage} ${extractedJob} >>>>> \n\n\n\n`
-          );
-          logger.info(`filteredJobs[id], ${filteredJobs[id]}`);
           const {
             resumeMatchScore,
             requirementMatchScore,
@@ -96,19 +97,16 @@ async function processJobAlerts(userId) {
         }
       );
 
-    // logger.info(`------------------------------------------------`);
-    // logger.info(
-    //   `Filtered jobs: ${JSON.stringify(personalizedJobRecommendations)}`
-    // );
-    // logger.info(`------------------------------------------------`);
 
     if (personalizedJobRecommendations.length > 0) {
       sendJobAlertEmail(user.email, personalizedJobRecommendations);
     }
 
     user.lastProcessedAt = new Date();
+    user.lastProcessedJobId = newJobPosts[newJobPosts.length - 1].id;
     await user.save();
   }
+
   return {
     message: 'Job alerts processed successfully',
     personalizedJobRecommendations,
@@ -191,7 +189,7 @@ async function processUnextractedJobPosts() {
 
 async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
   try {
-    const genAI = new GoogleGenerativeAI(process.env.EXPRESS_GEMINI_API_KEY_2);
+    const genAI = new GoogleGenerativeAI(process.env.EXPRESS_GEMINI_API_KEY);
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-pro',
       systemInstruction:
@@ -293,7 +291,7 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
 
     let finalProcessedJobs;
     const rawJobsData = result.response.candidates[0].content.parts[0].text;
-
+    logger.info(`rawJobsData: ${rawJobsData}`);
     if (typeof rawJobsData === 'string') {
       const cleanedString = rawJobsData.trim();
       finalProcessedJobs = JSON.parse(cleanedString);

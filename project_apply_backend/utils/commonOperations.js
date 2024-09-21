@@ -125,7 +125,7 @@ const createEmailBody = (jobs) => `
                         ? `<img src="${job.companyImage}" alt="Company Logo" style="width: 20px; height: 20px; border-radius: 50%; margin-right: 5px;">`
                         : ''
                     } • ${
-                      job.domain ? job.domain.domain : 'Other Domains'
+                      job.domain ? job.domain : 'Other Domains'
                     }</div>
                       <div class="details">
                         ${job.salary ? `Salary: ${job.salary} • ` : ''}${

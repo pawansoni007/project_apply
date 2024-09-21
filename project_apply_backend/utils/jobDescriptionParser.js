@@ -51,6 +51,8 @@ async function extractJobInfo(parsedJobPostsWithClampedJsons) {
     .replace(/\\/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+    
+  jobInfo = jobInfo.replace(/^```json\n/, '').replace(/\n```$/, '');
 
   try {
     // Try to parse it if it's a string, or return as is if it's already an object
