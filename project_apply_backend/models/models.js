@@ -20,6 +20,7 @@ const userSchema = new mongoose.Schema(
     resumeUrl: { type: String, default: null },
     lastProcessedJobId: { type: String, default: null },
     lastProcessedAt: { type: Date, default: null },
+    hasSubscribedForJobAlerts: { type: Boolean, default: false },
     profileCompleted: { type: Boolean, default: false },
   },
 

@@ -42,9 +42,13 @@ function register(req, res) {
           password: hashedPassword,
           resumeUrl: blockBlobClient.url,
           lastProcessedJobId: '',
+          hasSubscribedForJobAlerts: true,
         });
         await newUser.save();
-        res.json({ message: 'User registered successfully' });
+        res.json({
+          message: 'User registered and subscribed for job alerts successfully',
+          hasSubscribedForJobAlerts: newUser.hasSubscribedForJobAlerts,
+        });
       }
       resolve();
     } catch (error) {

@@ -22,33 +22,24 @@ const upload = multer({ storage: memoryStorage() });
 app.post('/api/user/register', upload.single('resume'), register);
 
 app.get('/api/user/process-job-alerts', auth, async (req, res) => {
-  try {
-    // logger.info(`User ID: ${req.user.userId}`);
-    processJobAlerts(req.user.userId)
-      .then((response) => {
-        res.json({
-          message: 'Job alerts processed successfully',
-          response: response,
-        });
-      })
-      .catch((error) => {
-        logger.error('Error in processJobAlerts:', error);
-        res
-          .status(500)
-          .json({
-            message: 'Failed to process job alerts',
-            error: error.message,
-          });
+  processJobAlerts(req.user.userId)
+    .then((response) => {
+      res.json({
+        message: 'Job alerts processed successfully',
+        response: response,
       });
-  } catch (error) {
-    logger.error('Error in processJobAlerts:', error);
-    res
-      .status(500)
-      .json({ message: 'Failed to process job alerts', error: error.message });
-  }
+    })
+    .catch((error) => {
+      logger.error('Error in processJobAlerts:', error);
+      res.status(500).json({
+        message: 'Failed to process job alerts',
+        error: error.message,
+      });
+    });
 });
 
 app.post('/api/user/login', login);
+
 
 // Error handling
 app.use(errorHandler);

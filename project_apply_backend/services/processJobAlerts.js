@@ -1,6 +1,8 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const axios = require('axios');
 const dotenv = require('dotenv');
+const retry = require('async-retry');
+
 dotenv.config();
 
 const { sendJobAlertEmail } = require('../utils/sendJobAlerts');
@@ -18,11 +20,14 @@ async function processJobAlerts(userId) {
     createdAt: { $gt: user.lastProcessedAt || new Date(0) },
   })
     .sort({ createdAt: -1 })
-    // .limit(12) // TODO - might remove this, as i am already doing batch processing
+    .limit(15) // TODO - might remove this, as i am already doing batch processing
     .select(
       'id title jobTypeReference extractedJob experience domain companyImage apply createdAt salary'
     )
     .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
+
+  if (!newJobPosts || newJobPosts.length === 0)
+    return { message: 'No new job posts to process' };
 
   const jobPostsList = newJobPosts.map((job) => ({
     id: job.id,
@@ -32,9 +37,6 @@ async function processJobAlerts(userId) {
     experience: job.experience.experience,
     domain: job.domain.domain,
   }));
-
-  if (!newJobPosts || newJobPosts.length === 0)
-    return { message: 'No new job posts to process' };
 
   let filteredJobs = {};
   let personalizedJobRecommendations = [];
@@ -97,7 +99,6 @@ async function processJobAlerts(userId) {
         }
       );
 
-
     if (personalizedJobRecommendations.length > 0) {
       sendJobAlertEmail(user.email, personalizedJobRecommendations);
     }
@@ -144,25 +145,35 @@ async function processUnextractedJobPosts() {
   try {
     const jobPosts = await fetchAndStoreJobPosts();
     // Remove any re-fetched jobs that were already processed
+
     const alreadyProcessedJobIds = await JobPost.find({
       extractedJob: { $exists: true, $ne: null },
     }).distinct('id');
+
     const newJobPosts = jobPosts.filter(
       (job) => !alreadyProcessedJobIds.includes(job.id)
     );
-    const unprocessedJobPosts = cleanJobPosts(newJobPosts);
 
     // Processing any failed job posts
     const unprocessedOrFailedJobPosts = await JobPost.find({
       $or: [{ extractedJob: { $exists: false } }, { extractedJob: null }],
     });
 
-    unprocessedJobPosts.push(...unprocessedOrFailedJobPosts);
+    const jobsIdsToProcess = new Set([
+      ...newJobPosts.map((job) => job.id),
+      ...unprocessedOrFailedJobPosts.map((job) => job.id),
+    ]);
 
-    logger.info(`Job posts to process: ${unprocessedJobPosts.length}`);
-    if (unprocessedJobPosts.length > 0) {
-      for (let i = 0; i < unprocessedJobPosts.length; i += BATCH_SIZE) {
-        const batch = unprocessedJobPosts.slice(i, i + BATCH_SIZE);
+    const finalJobsToProcess = await JobPost.find({
+      id: { $in: Array.from(jobsIdsToProcess) },
+    });
+
+    const finalCleanedJobsToProcess = cleanJobPosts(finalJobsToProcess);
+
+    logger.info(`Job posts to process: ${finalCleanedJobsToProcess.length}`);
+    if (finalCleanedJobsToProcess.length > 0) {
+      for (let i = 0; i < finalCleanedJobsToProcess.length; i += BATCH_SIZE) {
+        const batch = finalCleanedJobsToProcess.slice(i, i + BATCH_SIZE);
         const processedJobBatch = await extractJobInfo(batch);
         // TODO - Can go for a bulk update here
         for (const job of processedJobBatch) {
@@ -286,8 +297,33 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
         }
       }
     `;
+    let result;
 
-    const result = await model.generateContent([prompt, resumeFile]);
+    await retry(
+      async () => {
+        try {
+          result = await model.generateContent([prompt, resumeFile]);
+        } catch (error) {
+          logger.error(`Error filtering jobs with Gemini: ${error}`);
+          throw error; // Rethrow error so retry can catch it.
+        }
+      },
+      {
+        retries: 3,
+        minTimeout: 30000, // 30 seconds
+        maxTimeout: 180000, // 3 minutes
+        factor: 2.5,
+        onRetry: (error, attempt) => {
+          logger.error(
+            `Attempt ${attempt}, Error in processing filterJobsWithGemini ${error}`
+          );
+        },
+      }
+    ).catch((error) => {
+      logger.error(
+        `Failed to process the jobs after all retries in filterJobsWithGemini: ${error}`
+      );
+    });
 
     let finalProcessedJobs;
     const rawJobsData = result.response.candidates[0].content.parts[0].text;
