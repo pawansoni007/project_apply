@@ -26,6 +26,8 @@ async function processJobAlerts(userId) {
     )
     .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
 
+
+
   if (!newJobPosts || newJobPosts.length === 0)
     return { message: 'No new job posts to process' };
 
@@ -86,7 +88,7 @@ async function processJobAlerts(userId) {
             domain: domain.domain,
             experience: experience.experience,
             id,
-            createdAt: getJobFreshness(createdAt['$date']),
+            createdAt: getJobFreshness(createdAt),
             salary,
             jobTypeReference: jobTypeReference.jobType,
             title,
@@ -98,14 +100,16 @@ async function processJobAlerts(userId) {
           };
         }
       );
+      
+      logger.info(`personalizedJobRecommendations: ${JSON.stringify(personalizedJobRecommendations, null, 2)}`);
 
     if (personalizedJobRecommendations.length > 0) {
       sendJobAlertEmail(user.email, personalizedJobRecommendations);
     }
 
-    user.lastProcessedAt = new Date();
+    user.lastProcessedAt = new Date().toISOString(); 
     user.lastProcessedJobId = newJobPosts[newJobPosts.length - 1].id;
-    await user.save();
+    await user.save(); 
   }
 
   return {
@@ -250,13 +254,14 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
       - "overallMatchScore": An average of resumeMatchScore and requirementMatchScore.
       - "fitReason": A single concise string (max 100 words) highlighting the candidate's strongest matching skills or experiences for this role. Focus on the most relevant qualifications that align with key job requirements.
 
-      - "areasForImprovement": A single concise string (max 100 words) providing an honest evaluation of the candidate's suitability, including:
+      - "areasForImprovement": Do a thorough analysis on user's resume and user's job filters and return a single concise string (max 100 words) providing an honest evaluation of the candidate's suitability, including:
           1. A brief assessment of the overall match.
           2. One key strength relevant to the role.
           3. One significant gap or area for improvement.
           4. A clear recommendation on whether to apply.
           Be specific and honest, balancing encouragement with realistic advice.
-      
+
+
       5. Sort the results by overallMatchScore in descending order.
       6. Return a JSON array of filtered and sorted job posts. Include only the new fields from point 4 for each job. Exclude all input fields (extractedJob, domain, experience, title).
       
@@ -296,6 +301,10 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
           "fitReason": "Your experience with \"Python\" and AWS aligns well with the job requirements.",
         }
       }
+
+      What and when to remove job posts: 
+        1. Consider only the jobs as provided in the domain in the user's job filters as JSON or anything related to that if found/matches in the job description. Remove the rest, like a software developer wouldn't want to go for QA role.
+        2. Verify that the job location matches one of the user's preferred locations, if it's not the case, remove the job despite the fact that job matches user's profile. Location is more important. 
     `;
     let result;
 

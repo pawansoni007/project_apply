@@ -35,7 +35,7 @@ async function extractJobInfo(parsedJobPostsWithClampedJsons) {
   The input JSON array of job posts is as follows:
   ${JSON.stringify(parsedJobPostsWithClampedJsons)}
 
-  Please process each job post and return an array of JSON objects with the extracted information without any markdown formatting around or additional text. 
+  Please process each job post and return an array of JSON objects with the extracted information without any markdown formatting like three backticks json response object and then backticks around or additional text. 
 `;
 
   const result = await model.generateContentStream([prompt]);
