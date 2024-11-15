@@ -44,23 +44,20 @@ async function extractJobInfo(parsedJobPostsWithClampedJsons) {
     jobInfo += chunk.text();
   }
 
-  // Post-processing to remove escape sequences
-  jobInfo = jobInfo
-    .replace(/\\n/g, ' ')
-    .replace(/\\"/g, '"')
-    .replace(/\\/g, '')
-    .replace(/\s+/g, ' ')
-    .trim();
-    
-  jobInfo = jobInfo.replace(/^```json\n/, '').replace(/\n```$/, '');
+
+  // Remove any markdown formatting if present
+  if (jobInfo.startsWith('```json')) {
+    jobInfo = jobInfo.slice(jobInfo.indexOf('['), jobInfo.lastIndexOf(']') + 1);
+  }
 
   try {
+    console.log(`Job info: ${jobInfo}`);
     // Try to parse it if it's a string, or return as is if it's already an object
     const parsedJobInfo =
       typeof jobInfo === 'string' ? JSON.parse(jobInfo) : jobInfo;
-    logger.info(
-      `Raw extracted job info: ${JSON.stringify(parsedJobInfo, null, 2)}`
-    );
+    // logger.info(
+    //   `Raw extracted job info: ${JSON.stringify(parsedJobInfo, null, 2)}`
+    // );
     return parsedJobInfo;
   } catch (error) {
     logger.error(`Error parsing job info: ${error.message}`);

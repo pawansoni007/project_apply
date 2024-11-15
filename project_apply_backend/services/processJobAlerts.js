@@ -10,7 +10,7 @@ const { JobPost, User, UserJobMatch } = require('../models/models');
 const { fetchResumeFile } = require('../utils/fetchResumeFile');
 const { extractJobInfo } = require('../utils/jobDescriptionParser');
 const logger = require('../utils/logger');
-const { BATCH_SIZE } = require('../config/constants');
+const { BATCH_SIZE, PERSONAL_JOB_ALERT_BATCH_SIZE } = require('../config/constants');
 const { cleanJobPosts, getJobFreshness } = require('../utils/commonOperations');
 
 async function processJobAlerts(userId) {
@@ -44,8 +44,8 @@ async function processJobAlerts(userId) {
   let personalizedJobRecommendations = [];
   if (jobPostsList.length > 0) {
     const resumeFile = await fetchResumeFile(user.resumeUrl);
-    for (let i = 0; i < jobPostsList.length; i += BATCH_SIZE) {
-      const batch = jobPostsList.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < jobPostsList.length; i += PERSONAL_JOB_ALERT_BATCH_SIZE) {
+      const batch = jobPostsList.slice(i, i + PERSONAL_JOB_ALERT_BATCH_SIZE);
 
       let tempFilteredJobs = await filterJobsWithGemini(
         user.jobFilter,
@@ -84,7 +84,7 @@ async function processJobAlerts(userId) {
           return {
             apply,
             companyImage: companyImage.url,
-            companyName: extractedJob['Company Name'],
+            companyName: extractedJob['Company Name'] ?? 'No company, just apply anyways!',
             domain: domain.domain,
             experience: experience.experience,
             id,
@@ -208,7 +208,7 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
     const model = genAI.getGenerativeModel({
       model: 'gemini-1.5-pro',
       systemInstruction:
-        'Return valid, parsable JSON array of objects with no "\n" escapes or extra formatting. Verify JSON validity in Node.js environment before responding. Follow all prompt instructions carefully.JSON.parse() should not throw any errors when I try to parse the response.',
+        'Return valid, parsable JSON array of objects with no "\n" escapes or extra formatting. Verify JSON validity in Node.js environment before responding. Follow all prompt instructions carefully.JSON.parse() should not throw any errors when I try to parse the response. NO MARKDOWN WRAPPING OF ```json``` or any sorts.',
       generationConfig: {
         temperature: 1.0,
         topK: 1,
@@ -391,7 +391,7 @@ async function fetchAndStoreJobPosts() {
 
     // Filter out internships and then update existing jobs or insert new ones
     const fullTimeJobs = jobPosts.filter(
-      (job) => job.jobTypeReference.jobType === 'Full Time'
+      (job) => job.jobTypeReference.jobType === 'Full Time' || job.jobTypeReference.jobType === 'Remote'
     );
 
     // logger.info(`Job posts: ${JSON.stringify(fullTimeJobs)}`);
