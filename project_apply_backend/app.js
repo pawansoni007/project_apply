@@ -41,7 +41,7 @@ app.get('/api/user/process-job-alerts', auth, async (req, res) => {
 app.post('/api/user/login', login);
 
 app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({ status: 'ok. healthy.' });
 });
 
 
