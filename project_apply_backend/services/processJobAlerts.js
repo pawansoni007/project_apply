@@ -14,135 +14,147 @@ const { BATCH_SIZE, PERSONAL_JOB_ALERT_BATCH_SIZE } = require('../config/constan
 const { cleanJobPosts, getJobFreshness } = require('../utils/commonOperations');
 
 async function processJobAlerts(userId) {
-  const user = await User.findById(userId);
-  logger.info(`user: ${JSON.stringify(user, null, 2)}`);
-  let newJobPosts = await JobPost.find({
-    createdAt: { $gt: user.lastProcessedAt || new Date(0) },
-  })
-    .sort({ createdAt: -1 })
-    .limit(15) // TODO - might remove this, as i am already doing batch processing
-    .select(
-      'id title jobTypeReference extractedJob experience domain companyImage apply createdAt salary'
-    )
-    .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
+  try {
+    const user = await User.findById(userId);
+    logger.info(`user: ${JSON.stringify(user, null, 2)}`);
+    let newJobPosts = await JobPost.find({
+      createdAt: { $gt: user.lastProcessedAt || new Date(0) },
+    })
+      .sort({ createdAt: -1 })
+      .limit(15) // TODO - might remove this, as i am already doing batch processing
+      .select(
+        'id title jobTypeReference extractedJob experience domain companyImage apply createdAt salary'
+      )
+      .lean(); // Use lean() to return plain JavaScript objects instead of Mongoose documents, skips hydrating the result into a Mongoose document; reduces memory usage and improves performance for large datasets and omits virtuals, getters, setters, and custom methods of Mongoose documents.
 
+    logger.info(`newJobPosts: ${JSON.stringify(newJobPosts, null, 2)}`);
 
+    if (!newJobPosts || newJobPosts.length === 0)
+      return { message: 'No new job posts to process' };
 
-  if (!newJobPosts || newJobPosts.length === 0)
-    return { message: 'No new job posts to process' };
+    const jobPostsList = newJobPosts.map((job) => ({
+      id: job.id,
+      title: job.title,
+      jobType: job.jobTypeReference.jobType,
+      extractedJob: job.extractedJob,
+      experience: job.experience.experience,
+      domain: job.domain.domain,
+    }));
 
-  const jobPostsList = newJobPosts.map((job) => ({
-    id: job.id,
-    title: job.title,
-    jobType: job.jobTypeReference.jobType,
-    extractedJob: job.extractedJob,
-    experience: job.experience.experience,
-    domain: job.domain.domain,
-  }));
+    let filteredJobs = {};
+    let personalizedJobRecommendations = [];
+    if (jobPostsList.length > 0) {
+      const resumeFile = await fetchResumeFile(user.resumeUrl);
+      for (let i = 0; i < jobPostsList.length; i += PERSONAL_JOB_ALERT_BATCH_SIZE) {
+        const batch = jobPostsList.slice(i, i + PERSONAL_JOB_ALERT_BATCH_SIZE);
 
-  let filteredJobs = {};
-  let personalizedJobRecommendations = [];
-  if (jobPostsList.length > 0) {
-    const resumeFile = await fetchResumeFile(user.resumeUrl);
-    for (let i = 0; i < jobPostsList.length; i += PERSONAL_JOB_ALERT_BATCH_SIZE) {
-      const batch = jobPostsList.slice(i, i + PERSONAL_JOB_ALERT_BATCH_SIZE);
+        let tempFilteredJobs = await filterJobsWithGemini(
+          user.jobFilter,
+          batch,
+          resumeFile
+        );
 
-      let tempFilteredJobs = await filterJobsWithGemini(
-        user.jobFilter,
-        batch,
-        resumeFile
-      );
+        filteredJobs = { ...filteredJobs, ...tempFilteredJobs };
+      }
 
-      filteredJobs = { ...filteredJobs, ...tempFilteredJobs };
-    }
+      await saveMatchingJobs(filteredJobs, userId);
 
-    await saveMatchingJobs(filteredJobs, userId);
-
-    personalizedJobRecommendations = newJobPosts
-      .filter((job) => filteredJobs[job.id])
-      .map(
-        ({
-          apply,
-          companyImage,
-          domain,
-          experience,
-          id,
-          createdAt,
-          salary,
-          jobTypeReference,
-          title,
-          extractedJob,
-        }) => {
-          const {
-            resumeMatchScore,
-            requirementMatchScore,
-            overallMatchScore,
-            fitReason,
-            areasForImprovement,
-          } = filteredJobs[id];
-
-          return {
+      personalizedJobRecommendations = newJobPosts
+        .filter((job) => filteredJobs[job.id])
+        .map(
+          ({
             apply,
-            companyImage: companyImage.url,
-            companyName: extractedJob['Company Name'] ?? 'No company, just apply anyways!',
-            domain: domain.domain,
-            experience: experience.experience,
+            companyImage,
+            domain,
+            experience,
             id,
-            createdAt: getJobFreshness(createdAt),
+            createdAt,
             salary,
-            jobTypeReference: jobTypeReference.jobType,
+            jobTypeReference,
             title,
-            resumeMatchScore,
-            requirementMatchScore,
-            overallMatchScore,
-            fitReason,
-            areasForImprovement,
-          };
-        }
-      );
-      
+            extractedJob,
+          }) => {
+            const {
+              resumeMatchScore,
+              requirementMatchScore,
+              overallMatchScore,
+              fitReason,
+              areasForImprovement,
+            } = filteredJobs[id];
+
+            return {
+              apply,
+              companyImage: companyImage.url,
+              companyName: extractedJob['Company Name'] ?? 'No company, just apply anyways!',
+              domain: domain.domain,
+              experience: experience.experience,
+              id,
+              createdAt: getJobFreshness(createdAt),
+              salary,
+              jobTypeReference: jobTypeReference.jobType,
+              title,
+              resumeMatchScore,
+              requirementMatchScore,
+              overallMatchScore,
+              fitReason,
+              areasForImprovement,
+            };
+          }
+        );
+
       logger.info(`personalizedJobRecommendations: ${JSON.stringify(personalizedJobRecommendations, null, 2)}`);
 
-    if (personalizedJobRecommendations.length > 0) {
-      sendJobAlertEmail(user.email, personalizedJobRecommendations);
+      if (personalizedJobRecommendations.length > 0) {
+        sendJobAlertEmail(user.email, personalizedJobRecommendations);
+      }
+
+      user.lastProcessedAt = new Date().toISOString();
+      user.lastProcessedJobId = newJobPosts[newJobPosts.length - 1].id;
+      await user.save();
     }
 
-    user.lastProcessedAt = new Date().toISOString(); 
-    user.lastProcessedJobId = newJobPosts[newJobPosts.length - 1].id;
-    await user.save(); 
+    return {
+      message: 'Job alerts processed successfully',
+      personalizedJobRecommendations,
+      totalJobsProcessed: personalizedJobRecommendations.length,
+    };
+  } catch (error) {
+    console.log(`error in processJobAlerts: ${error}`);
+    logger.error(`Error processing job alerts: ${error}`);
+    throw error;
   }
-
-  return {
-    message: 'Job alerts processed successfully',
-    personalizedJobRecommendations,
-    totalJobsProcessed: personalizedJobRecommendations.length,
-  };
 }
 
 async function saveMatchingJobs(filteredJobs, userId) {
-  const filteredJobsToBulkUpsert = Object.entries(filteredJobs).map(
-    ([jobId, job]) => {
-      return {
-        updateOne: {
-          filter: { userId: userId, jobId: jobId },
-          update: {
-            $set: {
-              resumeMatchScore: job.resumeMatchScore,
-              requirementMatchScore: job.requirementMatchScore,
-              overallMatchScore: job.overallMatchScore,
-              fitReason: job.fitReason,
-              areasForImprovement: job.areasForImprovement,
-              createdAt: new Date().toISOString(),
+  try {
+    const filteredJobsToBulkUpsert = Object.entries(filteredJobs).map(
+      ([jobId, job]) => {
+        return {
+          updateOne: {
+            filter: { userId: userId, jobId: jobId },
+            update: {
+              $set: {
+                resumeMatchScore: job.resumeMatchScore,
+                requirementMatchScore: job.requirementMatchScore,
+                overallMatchScore: job.overallMatchScore,
+                fitReason: job.fitReason,
+                areasForImprovement: job.areasForImprovement,
+                createdAt: new Date().toISOString(),
+              },
             },
+            upsert: true,
           },
-          upsert: true,
-        },
-      };
-    }
-  );
-
-  let result = await UserJobMatch.bulkWrite(filteredJobsToBulkUpsert);
-  return result;
+        };
+      }
+    );
+  
+    let result = await UserJobMatch.bulkWrite(filteredJobsToBulkUpsert);
+    return result;
+  } catch (error) {
+    console.log(`error in saveMatchingJobs: ${error}`);
+    logger.error(`Error saving matching jobs in saveMatchingJobs: ${error}`);
+    throw error;
+  }
 }
 
 async function processUnextractedJobPosts() {
@@ -197,7 +209,8 @@ async function processUnextractedJobPosts() {
       }
     }
   } catch (error) {
-    logger.error(`Error processing unextracted job posts: ${error}`);
+    console.log(`error in processUnextractedJobPosts: ${error}`);
+    logger.error(`Error processing unextracted job posts in processUnextractedJobPosts: ${error}`);
     throw error;
   }
 }
@@ -242,8 +255,7 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
     2. Compare the job post against the user's requirements and resume.
     3. Include the job post in the results if:
       - The experience range matches (or is close to) the user's specified range and resume experience.
-      - At least ${
-        userFilter.skillMatchPercentage
+      - At least ${userFilter.skillMatchPercentage
       }% of the user's specified skills in the json file or skills mentioned in their resume are mentioned or implied in the job description.
       - The job domain matches one of the user's specified domains or aligns with their resume.
         
@@ -353,7 +365,8 @@ async function filterJobsWithGemini(userFilter, jobPosts, resumeFile) {
 
     return groupedJobs;
   } catch (error) {
-    logger.error(`Error filtering jobs with Gemini: ${error}`);
+    console.log(`error in filterJobsWithGemini: ${error}`);
+    logger.error(`Error filtering jobs with Gemini in filterJobsWithGemini: ${error}`);
     throw error;
   }
 }
@@ -416,7 +429,8 @@ async function fetchAndStoreJobPosts() {
 
     return upsertedJobs;
   } catch (error) {
-    logger.error('Error fetching and storing job posts:', error);
+    console.log(`error in fetchAndStoreJobPosts: ${error}`);
+    logger.error(`Error fetching and storing job posts in fetchAndStoreJobPosts: ${error}`);
   }
 }
 

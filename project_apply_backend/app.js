@@ -1,7 +1,7 @@
 const express = require('express');
 const errorHandler = require('./middleware/errorHandler');
 const cors = require('cors');
-const { register, login } = require('./controllers/register');
+const { register, login, callBackForJobAlerts } = require('./controllers/register');
 const multer = require('multer');
 const { processJobAlerts } = require('./services/processJobAlerts');
 const logger = require('./utils/logger');
@@ -39,6 +39,10 @@ app.get('/api/user/process-job-alerts', auth, async (req, res) => {
 });
 
 app.post('/api/user/login', login);
+
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
 
 
 // Error handling

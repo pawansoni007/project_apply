@@ -172,4 +172,11 @@ function login(req, res, next) {
   });
 }
 
-module.exports = { register, completeProfile, getProfile, login };
+function callBackForJobAlerts(req, res) {
+  logger.info('Job alerts callback received');
+  logger.error('Job alerts callback received');
+  console.log('Job alerts callback received');
+  res.json({ message: 'Job alerts callback received' });
+}
+
+module.exports = { register, completeProfile, getProfile, login, callBackForJobAlerts };
